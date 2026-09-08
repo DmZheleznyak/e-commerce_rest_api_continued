@@ -53,7 +53,7 @@
     );
 
     CREATE TABLE USERS (
-	id INT PRIMARY KEY,
+	id SERIAL PRIMARY KEY,
 	email VARCHAR(255) UNIQUE NOT NULL,
     password VARCHAR(255),
 	customer_id INT UNIQUE,
