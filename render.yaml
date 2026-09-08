@@ -1,0 +1,53 @@
+services:
+  - type: web
+    name: anchorope
+    runtime: node
+    plan: free
+    buildCommand: npm run build
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: CLIENT_URL
+        value: https://anchorope.onrender.com
+      - key: SESSION_SECRET
+        generateValue: true
+      - key: DB_HOST
+        fromDatabase:
+          name: anchorope-db
+          property: host
+      - key: DB_PORT
+        fromDatabase:
+          name: anchorope-db
+          property: port
+      - key: DB_NAME
+        fromDatabase:
+          name: anchorope-db
+          property: database
+      - key: DB_USER
+        fromDatabase:
+          name: anchorope-db
+          property: user
+      - key: DB_PASSWORD
+        fromDatabase:
+          name: anchorope-db
+          property: password
+      - key: STRIPE_SECRET_KEY
+        sync: false
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: GOOGLE_CALLBACK_URL
+        value: https://anchorope.onrender.com/api/auth/google/callback
+      - key: FACEBOOK_APP_ID
+        sync: false
+      - key: FACEBOOK_APP_SECRET
+        sync: false
+      - key: FACEBOOK_CALLBACK_URL
+        value: https://anchorope.onrender.com/api/auth/facebook/callback
+
+databases:
+  - name: anchorope-db
+    plan: free

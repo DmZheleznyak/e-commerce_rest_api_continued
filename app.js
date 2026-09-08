@@ -1,14 +1,17 @@
-const express = require('express');
+ const express = require('express');
+const path = require('path');
 const session = require('express-session');
+const cors = require('cors');
+require('dotenv').config();
 const pool = require('./db'); // Import the database connection
 const passport = require('./passport'); // Import the configured passport instance
 const app = express();
-const port = 3000;
-const bcrypt = require('bcrypt');
+const bcrypt = require('bcryptjs');
+const Stripe = require('stripe');
 const swaggerDocument = require('./swagger/swagger.js');
 const swaggerUi = require('swagger-ui-express');
-
-require('dotenv').config();
+const sessionSecret = process.env.SESSION_SECRET || 'development-session-secret';
+const stripe = process.env.STRIPE_SECRET_KEY ? new Stripe(process.env.STRIPE_SECRET_KEY) : null;
 
 // async function testConnection() {
 //   const { rows } = await pool.query('SELECT current_database()');
@@ -37,32 +40,103 @@ require('dotenv').config();
 app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
+const clientUrl = process.env.CLIENT_URL || 'http://localhost:3001';
+
+app.use(cors({
+    origin: clientUrl,
+    credentials: true
+}));
 
 // Swagger UI setup
 app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerDocument));
 
 // LOGIN ENDPOINT
 app.use(session({
-    secret: process.env.SESSION_SECRET ,
+    secret: sessionSecret,
     resave: false,
     saveUninitialized: false,
-    cookie: { maxAge: 60 * 60 * 1000 } // 1 hour
-}))
+    cookie: {
+        httpOnly: true,
+        sameSite: 'lax',
+        secure: process.env.NODE_ENV === 'production',
+        maxAge: 60 * 60 * 1000
+    }
+}));
 
 // PASSPORT ===========================================
 app.use(passport.initialize());
 app.use(passport.session());
 
+app.get('/health', (req, res) => {
+    res.json({ status: 'ok' });
+});
+
 // LOGIN ENDPOINT
 app.post('/api/login', (req, res, next) => {
+    const { email, password } = req.body;
+    if (!email || !password) {
+        return res.status(400).json({ error: 'Email and password are required' });
+    }
+
     passport.authenticate('local', (err, user, info) => {
         if (err) return res.status(500).json({ error: err.message });
-        if (!user) return res.status(401).json({ error: info.message });
+        if (!user) return res.status(401).json({ error: info?.message || 'Invalid email or password' });
         req.logIn(user, (err) => {
             if (err) return res.status(500).json({ error: err.message });
-            return res.json({ 
-                message: 'Login successful', 
-                user: { id: user.id, email: user.email, customer_id: user.customer_id }
+            req.session.save((saveError) => {
+                if (saveError) return res.status(500).json({ error: saveError.message });
+                return res.json({
+                    message: 'Login successful',
+                    user: { id: user.id, email: user.email, customer_id: user.customer_id }
+                });
+            });
+        });
+    })(req, res, next);
+});
+
+const redirectToLoginWithError = (res, message) => {
+    res.redirect(`${clientUrl}/login?error=${encodeURIComponent(message)}`);
+};
+
+app.get('/api/auth/google', (req, res, next) => {
+    if (!process.env.GOOGLE_CLIENT_ID || !process.env.GOOGLE_CLIENT_SECRET) {
+        return redirectToLoginWithError(res, 'Google login is not configured');
+    }
+    passport.authenticate('google', { scope: ['profile', 'email'] })(req, res, next);
+});
+
+app.get('/api/auth/google/callback', (req, res, next) => {
+    passport.authenticate('google', (err, user) => {
+        if (err || !user) {
+            return redirectToLoginWithError(res, err?.message || 'Google login failed');
+        }
+        req.logIn(user, (loginError) => {
+            if (loginError) return next(loginError);
+            req.session.save((saveError) => {
+                if (saveError) return next(saveError);
+                res.redirect(`${clientUrl}/auth/callback?provider=google`);
+            });
+        });
+    })(req, res, next);
+});
+
+app.get('/api/auth/facebook', (req, res, next) => {
+    if (!process.env.FACEBOOK_APP_ID || !process.env.FACEBOOK_APP_SECRET) {
+        return redirectToLoginWithError(res, 'Facebook login is not configured');
+    }
+    passport.authenticate('facebook', { scope: ['email'] })(req, res, next);
+});
+
+app.get('/api/auth/facebook/callback', (req, res, next) => {
+    passport.authenticate('facebook', (err, user) => {
+        if (err || !user) {
+            return redirectToLoginWithError(res, err?.message || 'Facebook login failed');
+        }
+        req.logIn(user, (loginError) => {
+            if (loginError) return next(loginError);
+            req.session.save((saveError) => {
+                if (saveError) return next(saveError);
+                res.redirect(`${clientUrl}/auth/callback?provider=facebook`);
             });
         });
     })(req, res, next);
@@ -73,16 +147,40 @@ app.get('/api/me', (req, res) => {
     if (!req.isAuthenticated()) {
         return res.status(401).json({ error: 'Unauthorized' });
     }
-    res.json({ 
-        user: { id: req.user}
+    res.json({
+        user: {
+            id: req.user.id,
+            email: req.user.email,
+            customer_id: req.user.customer_id
+        }
     });
 });
 
+const requireAuth = (req, res, next) => {
+    if (!req.isAuthenticated()) {
+        return res.status(401).json({ error: 'Unauthorized' });
+    }
+    next();
+};
+
+const requireCustomer = (req, res, next) => {
+    if (!req.user.customer_id) {
+        return res.status(400).json({ error: 'The current user does not have a customer account.' });
+    }
+
+    req.customerId = req.user.customer_id;
+    next();
+};
+
 // EXIT
 app.post('/api/logout', (req, res) => { 
-    req.logout((err) => {
-        if (err) return res.status(500).json({ error: err.message });
-        res.json({ message: 'Logged out successfully' });
+    req.logout((logoutError) => {
+        if (logoutError) return res.status(500).json({ error: logoutError.message });
+        req.session.destroy((destroyError) => {
+            if (destroyError) return res.status(500).json({ error: destroyError.message });
+            res.clearCookie('connect.sid');
+            res.json({ message: 'Logged out successfully' });
+        });
     })
 });
 
@@ -165,7 +263,7 @@ app.get('/api/customers/:id/orders', async (req, res) => {
     try {
         const { id } = req.params;
         const result = await pool.query(
-            'SELECT * FROM "Order" WHERE customer_id = $1 ORDER BY time DESC',
+            'SELECT * FROM orders WHERE customer_id = $1 ORDER BY time DESC',
             [id]
         );
         res.json(result.rows);
@@ -181,18 +279,61 @@ app.get('/api/customers/:id/orders', async (req, res) => {
 // Получить все заказы
 app.get('/api/orders', async (req, res) => {
     try {
-        const result = await pool.query('SELECT * FROM "ORDERS" ORDER BY time DESC');
+        const result = await pool.query('SELECT * FROM orders ORDER BY time DESC');
         res.json(result.rows);
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
 });
 
+// Return only completed orders for the current customer.
+app.get('/api/orders/history', requireAuth, requireCustomer, async (req, res) => {
+    try {
+        const result = await pool.query(
+                `SELECT orders.id AS order_id, orders.time, 'completed' AS status,
+                    order_info.order_info_id,
+                    order_info.product_id, order_info.price, order_info.discount,
+                    order_info.quantity, product.name
+             FROM orders
+             JOIN order_info ON order_info.order_id = orders.id
+             JOIN product ON product.id = order_info.product_id
+             WHERE orders.customer_id = $1
+             ORDER BY orders.time DESC, order_info.order_info_id`,
+            [req.customerId]
+        );
+
+        const orders = result.rows.reduce((history, row) => {
+            let order = history.find((item) => item.id === row.order_id);
+            if (!order) {
+                order = { id: row.order_id, time: row.time, status: row.status, items: [] };
+                history.push(order);
+            }
+            order.items.push({
+                id: row.product_id,
+                name: row.name,
+                price: row.price,
+                discount: row.discount,
+                quantity: row.quantity
+            });
+            return history;
+        }, []);
+        res.json(orders);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
 // Получить заказ по ID
-app.get('/api/orders/:id', async (req, res) => {
+app.get('/api/orders/:id', requireAuth, requireCustomer, async (req, res) => {
     try {
         const { id } = req.params;
-        const result = await pool.query('SELECT * FROM "Order" WHERE id = $1', [id]);
+        if (!/^\d+$/.test(id)) {
+            return res.status(404).json({ error: 'Заказ не найден' });
+        }
+        const result = await pool.query(
+            'SELECT * FROM orders WHERE id = $1 AND customer_id = $2',
+            [id, req.customerId]
+        );
         if (result.rows.length === 0) {
             return res.status(404).json({ error: 'Заказ не найден' });
         }
@@ -206,7 +347,7 @@ app.post('/api/orders', async (req, res) => {
     try {
         const { customer_id, time } = req.body;
         const result = await pool.query(
-            'INSERT INTO "Order" (customer_id, time) VALUES ($1, $2) RETURNING *',
+            'INSERT INTO orders (customer_id, time) VALUES ($1, $2) RETURNING *',
             [customer_id, time]
         );
         res.status(201).json(result.rows[0]);
@@ -221,7 +362,7 @@ app.put('/api/orders/:id', async (req, res) => {
         const { id } = req.params;
         const { customer_id, time } = req.body;
         const result = await pool.query(
-            'UPDATE "Order" SET customer_id = $1, time = $2 WHERE id = $3 RETURNING *',
+            'UPDATE orders SET customer_id = $1, time = $2 WHERE id = $3 RETURNING *',
             [customer_id, time, id]
         );
         if (result.rows.length === 0) {
@@ -237,7 +378,7 @@ app.put('/api/orders/:id', async (req, res) => {
 app.delete('/api/orders/:id', async (req, res) => {
     try {
         const { id } = req.params;
-        const result = await pool.query('DELETE FROM "Order" WHERE id = $1 RETURNING *', [id]);
+        const result = await pool.query('DELETE FROM orders WHERE id = $1 RETURNING *', [id]);
         if (result.rows.length === 0) {
             return res.status(404).json({ error: 'Заказ не найден' });
         }
@@ -250,6 +391,310 @@ app.delete('/api/orders/:id', async (req, res) => {
 // =============================================
 // PRODUCTS
 // =============================================
+
+// Get the current customer's active cart.
+app.get('/api/cart', requireAuth, requireCustomer, async (req, res) => {
+    try {
+        const result = await pool.query(
+                `SELECT c.id AS cart_id, c.status, ci.product_id, ci.quantity AS cart_quantity,
+                    p.*
+             FROM shopping_cart c
+             LEFT JOIN shopping_cart_item ci ON ci.cart_id = c.id
+             LEFT JOIN product p ON p.id = ci.product_id
+             WHERE c.customer_id = $1 AND c.status = 'active'
+             ORDER BY ci.id`,
+            [req.customerId]
+        );
+
+        const firstRow = result.rows[0];
+        res.json({
+            id: firstRow?.cart_id || null,
+            status: 'active',
+            items: result.rows.filter((row) => row.product_id !== null).map((row) => ({
+                id: row.product_id,
+                name: row.name,
+                price: row.price,
+                description: row.description,
+                image: row.image,
+                image_url: row.image_url,
+                quantity: row.cart_quantity,
+                available_quantity: row.cart_quantity + row.quantity
+            }))
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Add an item to the current customer's active cart.
+app.post('/api/cart/items', requireAuth, requireCustomer, async (req, res) => {
+    const productId = Number(req.body.product_id);
+    const requestedQuantity = Number(req.body.quantity || 1);
+    if (!Number.isInteger(productId) || !Number.isInteger(requestedQuantity) || requestedQuantity < 1) {
+        return res.status(400).json({ error: 'product_id and a positive integer quantity are required.' });
+    }
+
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
+        const productResult = await client.query('SELECT * FROM product WHERE id = $1 FOR UPDATE', [productId]);
+        if (productResult.rows.length === 0) {
+            await client.query('ROLLBACK');
+            return res.status(404).json({ error: 'Product not found.' });
+        }
+
+        const product = productResult.rows[0];
+        if (product.quantity < requestedQuantity) {
+            await client.query('ROLLBACK');
+            return res.status(409).json({ error: 'Not enough product stock.' });
+        }
+
+        const cartResult = await client.query(
+            `INSERT INTO shopping_cart (customer_id, status)
+             VALUES ($1, 'active')
+             ON CONFLICT (customer_id) WHERE status = 'active' DO UPDATE SET customer_id = EXCLUDED.customer_id
+             RETURNING id`,
+            [req.customerId]
+        );
+        const cartId = cartResult.rows[0].id;
+        const existingItemResult = await client.query(
+            `SELECT quantity FROM shopping_cart_item
+             WHERE cart_id = $1 AND product_id = $2
+             FOR UPDATE`,
+            [cartId, productId]
+        );
+        const currentCartQuantity = existingItemResult.rows[0]?.quantity || 0;
+        const newCartQuantity = currentCartQuantity + requestedQuantity;
+        const itemResult = await client.query(
+            existingItemResult.rows.length === 0
+                ? `INSERT INTO shopping_cart_item (cart_id, product_id, quantity)
+                   VALUES ($1, $2, $3::integer)
+                   RETURNING product_id, quantity`
+                : `UPDATE shopping_cart_item
+                   SET quantity = $3::integer
+                   WHERE cart_id = $1 AND product_id = $2
+                   RETURNING product_id, quantity`,
+            [cartId, productId, newCartQuantity]
+        );
+        const stockResult = await client.query(
+            `UPDATE product
+             SET quantity = quantity - $1::integer
+             WHERE id = $2
+             RETURNING quantity`,
+            [requestedQuantity, productId]
+        );
+        await client.query('COMMIT');
+        res.status(201).json({
+            ...product,
+            quantity: stockResult.rows[0].quantity,
+            cart_quantity: itemResult.rows[0].quantity
+        });
+    } catch (err) {
+        await client.query('ROLLBACK');
+        res.status(500).json({ error: err.message });
+    } finally {
+        client.release();
+    }
+});
+
+// Remove an item from the current customer's active cart.
+app.delete('/api/cart/items/:productId', requireAuth, requireCustomer, async (req, res) => {
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
+        const itemResult = await client.query(
+            `SELECT item.cart_id, item.product_id, item.quantity
+             FROM shopping_cart_item item
+             JOIN shopping_cart cart ON cart.id = item.cart_id
+             WHERE cart.customer_id = $1 AND cart.status = 'active'
+               AND item.product_id = $2
+             FOR UPDATE`,
+            [req.customerId, req.params.productId]
+        );
+        if (itemResult.rows.length === 0) {
+            await client.query('ROLLBACK');
+            return res.status(404).json({ error: 'Product is not in the active cart.' });
+        }
+        const item = itemResult.rows[0];
+        await client.query(
+            `DELETE FROM shopping_cart_item
+             WHERE cart_id = $1 AND product_id = $2`,
+            [item.cart_id, item.product_id]
+        );
+        await client.query(
+            `UPDATE product
+             SET quantity = quantity + $1::integer
+             WHERE id = $2`,
+            [item.quantity, item.product_id]
+        );
+        await client.query('COMMIT');
+        res.json({ message: 'Product removed from cart.' });
+    } catch (err) {
+        await client.query('ROLLBACK');
+        res.status(500).json({ error: err.message });
+    } finally {
+        client.release();
+    }
+});
+
+// Set the quantity for an item in the current customer's active cart.
+app.put('/api/cart/items/:productId', requireAuth, requireCustomer, async (req, res) => {
+    const quantity = Number(req.body.quantity);
+    if (!Number.isInteger(quantity) || quantity < 1) {
+        return res.status(400).json({ error: 'quantity must be a positive integer.' });
+    }
+
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
+        const itemResult = await client.query(
+            `SELECT item.cart_id, item.product_id, item.quantity, product.quantity AS stock
+             FROM shopping_cart_item item
+             JOIN shopping_cart cart ON cart.id = item.cart_id
+             JOIN product ON product.id = item.product_id
+             WHERE cart.customer_id = $1 AND cart.status = 'active'
+               AND item.product_id = $2
+             FOR UPDATE OF item, product`,
+            [req.customerId, req.params.productId]
+        );
+        if (itemResult.rows.length === 0) {
+            await client.query('ROLLBACK');
+            return res.status(404).json({ error: 'Product is not in the active cart.' });
+        }
+        const item = itemResult.rows[0];
+        const quantityDelta = quantity - item.quantity;
+        if (quantityDelta > item.stock) {
+            await client.query('ROLLBACK');
+            return res.status(409).json({ error: 'Not enough product stock.' });
+        }
+        const result = await client.query(
+            `UPDATE shopping_cart_item
+             SET quantity = $1::integer
+             WHERE cart_id = $2 AND product_id = $3
+             RETURNING product_id, quantity`,
+            [quantity, item.cart_id, item.product_id]
+        );
+        await client.query(
+            `UPDATE product
+             SET quantity = quantity - $1::integer
+             WHERE id = $2`,
+            [quantityDelta, item.product_id]
+        );
+        await client.query('COMMIT');
+        res.json(result.rows[0]);
+    } catch (err) {
+        await client.query('ROLLBACK');
+        res.status(500).json({ error: err.message });
+    } finally {
+        client.release();
+    }
+});
+
+// Convert the active cart into one order with one order_info row per product.
+app.post('/api/payments/create-intent', requireAuth, requireCustomer, async (req, res) => {
+    if (!stripe) {
+        return res.status(503).json({ error: 'Stripe is not configured on the server.' });
+    }
+
+    try {
+        const result = await pool.query(
+            `SELECT cart.id AS cart_id,
+                    COALESCE(SUM(item.quantity * product.price), 0) AS total
+             FROM shopping_cart cart
+             JOIN shopping_cart_item item ON item.cart_id = cart.id
+             JOIN product ON product.id = item.product_id
+             WHERE cart.customer_id = $1 AND cart.status = 'active'
+             GROUP BY cart.id`,
+            [req.customerId]
+        );
+        if (result.rows.length === 0 || Number(result.rows[0].total) <= 0) {
+            return res.status(400).json({ error: 'The active cart is empty.' });
+        }
+
+        const cart = result.rows[0];
+        const amount = Math.round(Number(cart.total) * 100);
+        const paymentIntent = await stripe.paymentIntents.create({
+            amount,
+            currency: 'usd',
+            automatic_payment_methods: { enabled: true },
+            metadata: {
+                customer_id: String(req.customerId),
+                cart_id: String(cart.cart_id)
+            }
+        });
+
+        res.json({ clientSecret: paymentIntent.client_secret, amount });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.post('/api/cart/checkout', requireAuth, requireCustomer, async (req, res) => {
+    if (!stripe) {
+        return res.status(503).json({ error: 'Stripe is not configured on the server.' });
+    }
+
+    const paymentIntentId = req.body.payment_intent_id;
+    if (!paymentIntentId) {
+        return res.status(400).json({ error: 'A successful Stripe payment is required.' });
+    }
+
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
+        const cartResult = await client.query(
+            `SELECT cart.id AS cart_id, item.product_id, item.quantity, product.price, product.quantity AS stock
+             FROM shopping_cart cart
+             JOIN shopping_cart_item item ON item.cart_id = cart.id
+             JOIN product ON product.id = item.product_id
+             WHERE cart.customer_id = $1 AND cart.status = 'active'
+             FOR UPDATE OF cart, item, product`,
+            [req.customerId]
+        );
+        if (cartResult.rows.length === 0) {
+            await client.query('ROLLBACK');
+            return res.status(400).json({ error: 'The active cart is empty.' });
+        }
+
+        const expectedAmount = Math.round(cartResult.rows.reduce(
+            (sum, item) => sum + Number(item.price) * Number(item.quantity),
+            0
+        ) * 100);
+        const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
+        if (paymentIntent.status !== 'succeeded'
+            || paymentIntent.amount !== expectedAmount
+            || paymentIntent.metadata.customer_id !== String(req.customerId)) {
+            await client.query('ROLLBACK');
+            return res.status(402).json({ error: 'Stripe payment was not completed for this cart.' });
+        }
+
+        const cartId = cartResult.rows[0].cart_id;
+        const orderResult = await client.query(
+            `INSERT INTO orders (customer_id, time) VALUES ($1, NOW()) RETURNING id, customer_id, time`,
+            [req.customerId]
+        );
+        const order = orderResult.rows[0];
+
+        for (const item of cartResult.rows) {
+            await client.query(
+                `INSERT INTO order_info (order_id, product_id, price, discount, quantity)
+                 VALUES ($1, $2, $3, 0, $4)`,
+                [order.id, item.product_id, item.price, item.quantity]
+            );
+        }
+        await client.query(
+            `UPDATE shopping_cart SET status = 'completed', completed_at = NOW() WHERE id = $1`,
+            [cartId]
+        );
+        await client.query('COMMIT');
+        res.status(201).json({ order });
+    } catch (err) {
+        await client.query('ROLLBACK');
+        res.status(500).json({ error: err.message });
+    } finally {
+        client.release();
+    }
+});
 
 // Получить все товары
 app.get('/api/products', async (req, res) => {
@@ -621,7 +1066,7 @@ app.get('/api/customers/:id/orders', async (req, res) => {
     try {
         const { id } = req.params;
         const result = await pool.query(
-            'SELECT * FROM "Order" WHERE customer_id = $1 ORDER BY time DESC',
+            'SELECT * FROM orders WHERE customer_id = $1 ORDER BY time DESC',
             [id]
         );
         res.json(result.rows);
@@ -637,7 +1082,7 @@ app.get('/api/customers/:id/orders', async (req, res) => {
 // Получить все заказы
 app.get('/api/orders', async (req, res) => {
     try {
-        const result = await pool.query('SELECT * FROM "Order" ORDER BY time DESC');
+        const result = await pool.query('SELECT * FROM orders ORDER BY time DESC');
         res.json(result.rows);
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -648,7 +1093,7 @@ app.get('/api/orders', async (req, res) => {
 app.get('/api/orders/:id', async (req, res) => {
     try {
         const { id } = req.params;
-        const result = await pool.query('SELECT * FROM "Order" WHERE id = $1', [id]);
+        const result = await pool.query('SELECT * FROM orders WHERE id = $1', [id]);
         if (result.rows.length === 0) {
             return res.status(404).json({ error: 'Заказ не найден' });
         }
@@ -662,7 +1107,7 @@ app.post('/api/orders', async (req, res) => {
     try {
         const { customer_id, time } = req.body;
         const result = await pool.query(
-            'INSERT INTO "Order" (customer_id, time) VALUES ($1, $2) RETURNING *',
+            'INSERT INTO orders (customer_id, time) VALUES ($1, $2) RETURNING *',
             [customer_id, time]
         );
         res.status(201).json(result.rows[0]);
@@ -677,7 +1122,7 @@ app.put('/api/orders/:id', async (req, res) => {
         const { id } = req.params;
         const { customer_id, time } = req.body;
         const result = await pool.query(
-            'UPDATE "Order" SET customer_id = $1, time = $2 WHERE id = $3 RETURNING *',
+            'UPDATE orders SET customer_id = $1, time = $2 WHERE id = $3 RETURNING *',
             [customer_id, time, id]
         );
         if (result.rows.length === 0) {
@@ -693,7 +1138,7 @@ app.put('/api/orders/:id', async (req, res) => {
 app.delete('/api/orders/:id', async (req, res) => {
     try {
         const { id } = req.params;
-        const result = await pool.query('DELETE FROM "Order" WHERE id = $1 RETURNING *', [id]);
+        const result = await pool.query('DELETE FROM orders WHERE id = $1 RETURNING *', [id]);
         if (result.rows.length === 0) {
             return res.status(404).json({ error: 'Заказ не найден' });
         }
@@ -1000,10 +1445,10 @@ app.delete('/api/order-info/:id_order', async (req, res) => {
 // REGISTRATION ENDPOINT
 app.post('/api/register', async (req, res) => {
     try {
-        const { email, password, name, address, contact } = req.body;
+        const { email, password, name, contact } = req.body;
 
         if (!email || !password) {
-            return res.status(400).json({ error: 'Email и пароль обязательны' });
+            return res.status(400).json({ error: 'Email and password are required' });
         }
 
         if (password.length < 6) {
@@ -1020,7 +1465,7 @@ app.post('/api/register', async (req, res) => {
         // Пробуем только customers (4 поля)
         const customerResult = await pool.query(
             'INSERT INTO customers (name, address, contact, history_orders) VALUES ($1, $2, $3, $4) RETURNING id',
-            [name || email, address || null, contact || email, null]
+            [name || email, '-', contact || email, null]
         );
 
         console.log('Customer created:', customerResult.rows[0]);
@@ -1033,9 +1478,21 @@ app.post('/api/register', async (req, res) => {
 
         console.log('User created:', userResult.rows[0]);
 
-        res.status(201).json({
-            message: 'Регистрация успешна',
-            user: userResult.rows[0]
+        req.logIn(userResult.rows[0], (loginError) => {
+            if (loginError) {
+                return res.status(500).json({ error: loginError.message });
+            }
+
+            req.session.save((saveError) => {
+                if (saveError) {
+                    return res.status(500).json({ error: saveError.message });
+                }
+
+                res.status(201).json({
+                    message: 'Регистрация успешна',
+                    user: userResult.rows[0]
+                });
+            });
         });
 
     } catch (err) {
@@ -1052,6 +1509,12 @@ app.post('/api/register', async (req, res) => {
 // =============================================
 // ЗАПУСК СЕРВЕРА
 // =============================================
+
+const frontendBuildPath = path.join(__dirname, 'anchorope', 'build');
+app.use(express.static(frontendBuildPath));
+app.get(/^(?!\/api(?:\/|$)).*/, (req, res) => {
+    res.sendFile(path.join(frontendBuildPath, 'index.html'));
+});
 
 app.listen(PORT, () => {
     console.log(`Сервер запущен: http://localhost:${PORT}`);

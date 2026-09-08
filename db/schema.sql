@@ -24,7 +24,7 @@
 
     CREATE TABLE ORDERS
     (
-    id INT PRIMARY KEY, 
+    id SERIAL PRIMARY KEY,
     customer_id INT NOT NULL,
     time TIMESTAMP NOT NULL,
     CONSTRAINT fk_order_customer FOREIGN KEY (customer_id) REFERENCES CUSTOMERS(id)
@@ -34,11 +34,11 @@
 
     CREATE TABLE ORDER_INFO
     (
-    id_order INT PRIMARY KEY,
+    id_order INT,
     price DECIMAL(10, 2) NOT NULL,
     discount DECIMAL(10, 2) DEFAULT 0,
     quantity INT NOT NULL DEFAULT 1,
-    Id INT NOT NULL,
+    Id INT,
     CONSTRAINT fk_order_info FOREIGN KEY (id_order) REFERENCES ORDERS(id)
     ON DELETE CASCADE
     ON UPDATE CASCADE
@@ -55,11 +55,20 @@
     CREATE TABLE USERS (
 	id INT PRIMARY KEY,
 	email VARCHAR(255) UNIQUE NOT NULL,
-	password VARCHAR(255) NOT NULL,
+    password VARCHAR(255),
 	customer_id INT UNIQUE,
 	created_at TIMESTAMP DEFAULT NOW(),
 	CONSTRAINT fk_user_customer
 		FOREIGN KEY (customer_id)
 		REFERENCES customers(id)
 		ON DELETE SET NULL
+    );
+
+    CREATE TABLE OAUTH_ACCOUNTS (
+        id SERIAL PRIMARY KEY,
+        user_id INT NOT NULL,
+        provider VARCHAR(50) NOT NULL,
+        provider_id VARCHAR(255) NOT NULL,
+        CONSTRAINT unique_oauth_provider_account UNIQUE (provider, provider_id),
+        CONSTRAINT fk_oauth_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     );
