@@ -9,7 +9,10 @@ const sqlFiles = [
     'orders-id-migration.sql'
 ];
 
-if (process.env.RUN_DB_INIT !== 'true') {
+const shouldInitializeDatabase = process.env.RUN_DB_INIT === 'true'
+    || process.env.NODE_ENV === 'production';
+
+if (!shouldInitializeDatabase) {
     console.log('Database initialization is disabled.');
     process.exit(0);
 }
