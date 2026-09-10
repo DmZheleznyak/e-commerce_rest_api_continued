@@ -28,6 +28,12 @@ const databaseHasUsersTable = async (client) => {
     return result.rows[0].exists;
 };
 
+const applySqlFile = async (client, fileName) => {
+    const filePath = path.join(__dirname, fileName);
+    await client.query(fs.readFileSync(filePath, 'utf8'));
+    console.log(`Applied ${fileName}`);
+};
+
 const initializeDatabase = async () => {
     const client = await pool.connect();
 
@@ -35,15 +41,14 @@ const initializeDatabase = async () => {
         await client.query('SELECT pg_advisory_lock(274839)');
 
         if (await databaseHasUsersTable(client)) {
-            console.log('Database schema already initialized.');
+            await applySqlFile(client, 'oauth-migration.sql');
+            console.log('Database schema already initialized; OAuth migration checked.');
             return;
         }
 
         await client.query('BEGIN');
         for (const fileName of sqlFiles) {
-            const filePath = path.join(__dirname, fileName);
-            await client.query(fs.readFileSync(filePath, 'utf8'));
-            console.log(`Applied ${fileName}`);
+            await applySqlFile(client, fileName);
         }
         await client.query('COMMIT');
         console.log('Database schema initialized.');

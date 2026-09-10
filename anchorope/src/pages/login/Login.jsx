@@ -1,7 +1,6 @@
 import { useState } from 'react';
 import { Link, useNavigate } from 'react-router';
-
-const apiUrl = process.env.REACT_APP_API_URL || window.location.origin;
+import { apiUrl } from '../../api';
 
 const Login = () => {
 	const [formData, setFormData] = useState({ email: '', password: '' });

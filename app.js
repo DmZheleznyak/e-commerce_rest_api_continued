@@ -1446,6 +1446,7 @@ app.delete('/api/order-info/:id_order', async (req, res) => {
 app.post('/api/register', async (req, res) => {
     try {
         const { email, password, name, contact } = req.body;
+        const customerContact = contact === undefined || contact === '' ? 0 : Number(contact);
 
         if (!email || !password) {
             return res.status(400).json({ error: 'Email and password are required' });
@@ -1453,6 +1454,10 @@ app.post('/api/register', async (req, res) => {
 
         if (password.length < 6) {
             return res.status(400).json({ error: 'Пароль должен быть минимум 6 символов' });
+        }
+
+        if (!Number.isInteger(customerContact)) {
+            return res.status(400).json({ error: 'Contact must be an integer' });
         }
 
         const existingUser = await pool.query('SELECT id FROM users WHERE email = $1', [email]);
@@ -1465,7 +1470,7 @@ app.post('/api/register', async (req, res) => {
         // Пробуем только customers (4 поля)
         const customerResult = await pool.query(
             'INSERT INTO customers (name, address, contact, history_orders) VALUES ($1, $2, $3, $4) RETURNING id',
-            [name || email, '-', contact || email, null]
+            [name || email, '-', customerContact, null]
         );
 
         console.log('Customer created:', customerResult.rows[0]);

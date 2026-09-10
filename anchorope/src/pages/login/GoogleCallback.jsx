@@ -1,12 +1,13 @@
 import { useEffect } from 'react';
 import { useNavigate, useSearchParams } from 'react-router';
+import { apiUrl } from '../../api';
 
 const GoogleCallback = () => {
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
 
   useEffect(() => {
-    fetch('/api/me', { credentials: 'include' })
+    fetch(`${apiUrl}/api/me`, { credentials: 'include' })
       .then((response) => {
         if (!response.ok) throw new Error('OAuth session was not created');
         return response.json();
