@@ -7,6 +7,27 @@ const pool = require('./db'); // Assuming you have a database connection module
 
 const getOAuthEmail = (profile) => profile.emails?.[0]?.value?.toLowerCase() || null;
 
+const ensureCustomerAccount = async (user) => {
+    if (user.customer_id) {
+        return user;
+    }
+
+    const customerResult = await pool.query(
+        `INSERT INTO customers (name, address, contact, history_orders)
+         VALUES ($1, '-', 0, NULL)
+         RETURNING id`,
+        [user.email]
+    );
+    const updatedUser = await pool.query(
+        `UPDATE users
+         SET customer_id = $1
+         WHERE id = $2
+         RETURNING *`,
+        [customerResult.rows[0].id, user.id]
+    );
+    return updatedUser.rows[0];
+};
+
 const findOrCreateOAuthUser = async (provider, profile) => {
     const providerId = profile.id;
     const email = getOAuthEmail(profile);
@@ -23,7 +44,7 @@ const findOrCreateOAuthUser = async (provider, profile) => {
         [provider, providerId]
     );
     if (providerUser.rows.length > 0) {
-        return providerUser.rows[0];
+        return ensureCustomerAccount(providerUser.rows[0]);
     }
 
     const existingUser = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
@@ -32,14 +53,20 @@ const findOrCreateOAuthUser = async (provider, profile) => {
             'INSERT INTO oauth_accounts (user_id, provider, provider_id) VALUES ($1, $2, $3)',
             [existingUser.rows[0].id, provider, providerId]
         );
-        return existingUser.rows[0];
+        return ensureCustomerAccount(existingUser.rows[0]);
     }
 
-    const newUser = await pool.query(
-        `INSERT INTO users (email, password)
-         VALUES ($1, NULL)
-         RETURNING *`,
+    const customerResult = await pool.query(
+        `INSERT INTO customers (name, address, contact, history_orders)
+         VALUES ($1, '-', 0, NULL)
+         RETURNING id`,
         [email]
+    );
+    const newUser = await pool.query(
+        `INSERT INTO users (email, password, customer_id)
+         VALUES ($1, NULL, $2)
+         RETURNING *`,
+        [email, customerResult.rows[0].id]
     );
     await pool.query(
         'INSERT INTO oauth_accounts (user_id, provider, provider_id) VALUES ($1, $2, $3)',
