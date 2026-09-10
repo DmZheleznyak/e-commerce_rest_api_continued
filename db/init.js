@@ -42,7 +42,8 @@ const initializeDatabase = async () => {
 
         if (await databaseHasUsersTable(client)) {
             await applySqlFile(client, 'oauth-migration.sql');
-            console.log('Database schema already initialized; OAuth migration checked.');
+            await applySqlFile(client, 'customers-id-migration.sql');
+            console.log('Database schema already initialized; migrations checked.');
             return;
         }
 

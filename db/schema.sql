@@ -7,7 +7,7 @@
 
     CREATE TABLE CUSTOMERS
     (
-    id INT PRIMARY KEY,
+    id SERIAL PRIMARY KEY,
     name VARCHAR(255) NOT NULL,
     address VARCHAR(100) NOT NULL NOT NULL,
     contact INT NOT NULL,
