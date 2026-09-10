@@ -37,6 +37,8 @@ services:
           property: password
       - key: STRIPE_SECRET_KEY
         sync: false
+      - key: REACT_APP_STRIPE_PUBLISHABLE_KEY
+        sync: false
       - key: GOOGLE_CLIENT_ID
         sync: false
       - key: GOOGLE_CLIENT_SECRET
