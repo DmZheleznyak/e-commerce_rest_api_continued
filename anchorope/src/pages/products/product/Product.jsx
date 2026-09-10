@@ -20,6 +20,9 @@ const Product = ({ product }) => {
           </p>
         </div>
         <p className="product-description">{description}</p>
+        <p className="product-rating" aria-label={`${product.review_average || 0} out of 5 stars from ${product.review_count || 0} reviews`}>
+          {product.review_count ? `${product.review_average} / 5 (${product.review_count})` : 'No reviews yet'}
+        </p>
         <p className="product-stock">
           {product.quantity > 0 ? `${product.quantity} available` : 'Currently unavailable'}
         </p>

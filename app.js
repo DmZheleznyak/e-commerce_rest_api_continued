@@ -703,7 +703,15 @@ app.post('/api/cart/checkout', requireAuth, requireCustomer, async (req, res) =>
 // Получить все товары
 app.get('/api/products', async (req, res) => {
     try {
-        const result = await pool.query('SELECT * FROM product ORDER BY id');
+        const result = await pool.query(
+            `SELECT product.*,
+                    COALESCE(ROUND(AVG(product_reviews.rating)::numeric, 1), 0) AS review_average,
+                    COUNT(product_reviews.id)::int AS review_count
+             FROM product
+             LEFT JOIN product_reviews ON product_reviews.product_id = product.id
+             GROUP BY product.id
+             ORDER BY product.id`
+        );
         res.json(result.rows);
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -714,12 +722,65 @@ app.get('/api/products', async (req, res) => {
 app.get('/api/products/:id', async (req, res) => {
     try {
         const { id } = req.params;
-        const result = await pool.query('SELECT * FROM product WHERE id = $1', [id]);
+        const result = await pool.query(
+            `SELECT product.*,
+                    COALESCE(ROUND(AVG(product_reviews.rating)::numeric, 1), 0) AS review_average,
+                    COUNT(product_reviews.id)::int AS review_count
+             FROM product
+             LEFT JOIN product_reviews ON product_reviews.product_id = product.id
+             WHERE product.id = $1
+             GROUP BY product.id`,
+            [id]
+        );
         if (result.rows.length === 0) {
             return res.status(404).json({ error: 'Товар не найден' });
         }
         res.json(result.rows[0]);
     } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.get('/api/products/:id/reviews', async (req, res) => {
+    try {
+        const result = await pool.query(
+                `SELECT product_reviews.id, product_reviews.product_id, product_reviews.customer_id,
+                    product_reviews.rating, product_reviews.review,
+                    product_reviews.created_at, product_reviews.updated_at,
+                    customers.name AS customer_name
+             FROM product_reviews
+             JOIN customers ON customers.id = product_reviews.customer_id
+             WHERE product_reviews.product_id = $1
+             ORDER BY product_reviews.created_at DESC`,
+            [req.params.id]
+        );
+        res.json(result.rows);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.put('/api/products/:id/reviews', requireAuth, requireCustomer, async (req, res) => {
+    const rating = Number(req.body.rating);
+    const review = typeof req.body.review === 'string' ? req.body.review.trim() : '';
+    if (!Number.isInteger(rating) || rating < 1 || rating > 5 || review.length < 1 || review.length > 2000) {
+        return res.status(400).json({ error: 'rating must be an integer from 1 to 5 and review must be 1-2000 characters.' });
+    }
+
+    try {
+        const result = await pool.query(
+            `INSERT INTO product_reviews (product_id, customer_id, rating, review)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT (product_id, customer_id)
+             DO UPDATE SET rating = EXCLUDED.rating, review = EXCLUDED.review, updated_at = NOW()
+             RETURNING id, product_id, customer_id, rating, review, created_at, updated_at`,
+            [req.params.id, req.customerId, rating, review]
+        );
+        res.status(201).json(result.rows[0]);
+    } catch (err) {
+        if (err.code === '23503') {
+            return res.status(404).json({ error: 'Product not found.' });
+        }
         res.status(500).json({ error: err.message });
     }
 });
