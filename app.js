@@ -42,6 +42,10 @@ app.use(express.json());
 const PORT = process.env.PORT || 3000;
 const clientUrl = process.env.CLIENT_URL || 'http://localhost:3001';
 
+if (process.env.NODE_ENV === 'production') {
+    app.set('trust proxy', 1);
+}
+
 app.use(cors({
     origin: clientUrl,
     credentials: true
