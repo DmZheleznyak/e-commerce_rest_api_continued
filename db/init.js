@@ -5,6 +5,7 @@ const pool = require('../db');
 const sqlFiles = [
     'schema.sql',
     'oauth-migration.sql',
+    'product-seed.sql',
     'cart-migration.sql',
     'orders-id-migration.sql'
 ];
@@ -43,6 +44,8 @@ const initializeDatabase = async () => {
         if (await databaseHasUsersTable(client)) {
             await applySqlFile(client, 'oauth-migration.sql');
             await applySqlFile(client, 'customers-id-migration.sql');
+            await applySqlFile(client, 'product-id-migration.sql');
+            await applySqlFile(client, 'product-seed.sql');
             console.log('Database schema already initialized; migrations checked.');
             return;
         }
